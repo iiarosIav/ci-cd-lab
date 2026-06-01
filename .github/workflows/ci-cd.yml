@@ -11,8 +11,9 @@ on:
         description: 'Версия образа для продукции (тег)'
         required: false
         default: 'latest'
+
 jobs:
-      build-and-test:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +64,7 @@ jobs:
 
       - name: Static analysis (clang-tidy)
         run: clang-tidy src/main.cpp --
+
   docker-build-push:
     needs: build-and-test
     if: github.ref == 'refs/heads/main'
@@ -84,6 +86,7 @@ jobs:
           IMAGE_TAG=ghcr.io/${{ env.REPO_LOWER }}:latest
           docker build -t $IMAGE_TAG .
           docker push $IMAGE_TAG
+
   deploy-staging:
     needs: docker-build-push
     runs-on: ubuntu-latest
@@ -118,6 +121,7 @@ jobs:
         with:
           name: staging-metrics
           path: staging_metrics.txt
+
   deploy-production:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -164,6 +168,7 @@ jobs:
         with:
           name: production-metrics
           path: production_metrics.txt
+
   notification:
     if: always()
     needs: [build-and-test, docker-build-push, deploy-staging, deploy-production]
