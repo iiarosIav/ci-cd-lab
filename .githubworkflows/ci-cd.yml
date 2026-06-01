@@ -1,0 +1,182 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия образа для продукции (тег)'
+        required: false
+        default: 'latest'
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-tidy ccache lcov wrk
+
+      - name: Cache ccache
+        uses: actions/cache@v3
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**') }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run integration tests
+        run: |
+          ./build/app &
+          PID=$!
+          sleep 3
+          curl --retry 5 --retry-delay 1 --fail http://localhost:8080/health || exit 1
+          bash tests/integration_test.sh
+          kill $PID
+
+      - name: Run load test (wrk)
+        run: |
+          ./build/app &
+          sleep 2
+          wrk -t2 -c100 -d10s http://localhost:8080/
+          kill %1
+
+      - name: Static analysis (clang-tidy)
+        run: clang-tidy src/main.cpp --
+  docker-build-push:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Convert repository name to lowercase
+        run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build and push image
+        run: |
+          IMAGE_TAG=ghcr.io/${{ env.REPO_LOWER }}:latest
+          docker build -t $IMAGE_TAG .
+          docker push $IMAGE_TAG
+  deploy-staging:
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Convert repository name to lowercase
+        run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Deploy to staging
+        run: |
+          docker run -d --name staging-app -p 8080:8080 ghcr.io/${{ env.REPO_LOWER }}:latest
+          sleep 5
+          curl --retry 5 --retry-delay 2 --fail http://localhost:8080/health || exit 1
+          echo "Staging deployment successful" >> deployment.log
+
+      - name: Save staging logs
+        if: always()
+        run: docker logs staging-app > staging_logs.txt
+
+      - name: Upload staging logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-logs
+          path: staging_logs.txt
+
+      - name: Save staging metrics
+        run: curl -s http://localhost:8080/metrics > staging_metrics.txt
+
+      - name: Upload staging metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-metrics
+          path: staging_metrics.txt
+  deploy-production:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Convert repository name to lowercase
+        run: echo "REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Blue-green deploy to production
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -z "$VERSION" ]; then VERSION="latest"; fi
+          IMAGE=ghcr.io/${{ env.REPO_LOWER }}:$VERSION
+
+          docker run -d --name app-green -p 8081:8080 $IMAGE
+          sleep 5
+          curl --retry 5 --retry-delay 2 --fail http://localhost:8081/health || exit 1
+
+          docker stop app-blue 2>/dev/null || true
+          docker run -d --name app-blue -p 8080:8080 $IMAGE
+          sleep 3
+          curl --fail http://localhost:8080/health || exit 1
+
+          docker stop app-green && docker rm app-green
+          echo $VERSION > current_version.txt
+
+      - name: Save production logs
+        if: always()
+        run: docker logs app-blue > production_logs.txt
+
+      - name: Upload production logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-logs
+          path: production_logs.txt
+
+      - name: Save production metrics
+        run: curl -s http://localhost:8080/metrics > production_metrics.txt
+
+      - name: Upload production metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-metrics
+          path: production_metrics.txt
+  notification:
+    if: always()
+    needs: [build-and-test, docker-build-push, deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate notification report
+        run: |
+          echo "==== CI/CD Pipeline Notification ===" > report.txt
+          echo "Repository: ${{ github.repository }}" >> report.txt
+          echo "Run number: ${{ github.run_number }}" >> report.txt
+          echo "Triggered by: ${{ github.actor }}" >> report.txt
+          echo "Event: ${{ github.event_name }}" >> report.txt
+          echo "Status: ${{ job.status }}" >> report.txt
+          echo "Date: $(date)" >> report.txt
+
+      - name: Upload notification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: notification-report-${{ github.run_id }}
+          path: report.txt
