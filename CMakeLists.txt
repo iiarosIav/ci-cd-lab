@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(app src/main.cpp)
 
-option(BUILD_TESTS "Build tests" ON)
+# Тесты собираются ТОЛЬКО если BUILD_TESTS=ON
+option(BUILD_TESTS "Build tests" OFF)
 
 if(BUILD_TESTS)
     enable_testing()

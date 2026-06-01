@@ -6,7 +6,8 @@ WORKDIR /app
 COPY src ./src
 COPY CMakeLists.txt .
 
-RUN mkdir build && cd build && cmake .. && make
+# Отключаем сборку тестов внутри Docker-образа
+RUN mkdir build && cd build && cmake -DBUILD_TESTS=OFF .. && make
 
 FROM alpine:latest
 
