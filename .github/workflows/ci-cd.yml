@@ -12,7 +12,7 @@ on:
         required: false
         default: 'latest'
 jobs:
-  build-and-test:
+      build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +20,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang-tidy ccache lcov wrk
+          sudo apt-get install -y cmake ninja-build clang-tidy ccache lcov wrk libgtest-dev
+          cd /usr/src/gtest
+          sudo cmake CMakeLists.txt
+          sudo make
+          sudo cp lib/*.a /usr/lib
 
       - name: Cache ccache
         uses: actions/cache@v3
